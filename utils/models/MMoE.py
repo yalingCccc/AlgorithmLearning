@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-from utils.layers.ActiveLayer import activation_layer
 from utils.layers.MPL import LinearLayer
 
 
@@ -40,15 +39,6 @@ class MMoE(nn.Module):
         self.experts = nn.ModuleList(experts)
         self.gates = nn.ModuleList(gates)
         self.mpls = nn.ModuleList(top_layer)
-
-    def create_mpl(self, task_name, input_dim, dims):
-        layers = nn.Sequential()
-        for i, dim in enumerate(dims):
-            if i != 0:
-                layers.add_module('%s_act_%s' % (task_name, i - 1), activation_layer(self.activation, input_dim))
-            layers.add_module('%s_dense_%s' % (task_name, i), nn.Linear(input_dim, dim))
-            input_dim = dim
-        return layers
 
     def forward(self, inputs):
         expert_outs, outputs = [], []

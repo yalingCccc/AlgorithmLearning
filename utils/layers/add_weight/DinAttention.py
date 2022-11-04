@@ -3,15 +3,14 @@ import torch.nn as nn
 from utils.layers.MPL import LinearLayer
 
 class AttentionUnitLayer(nn.Module):
-    def __init__(self, input_size, emb_size, act_func='Dice', batch_norm=False, dropout=0):
+    def __init__(self, emb_size, act_func='Dice', batch_norm=False, dropout=0):
         super(AttentionUnitLayer, self).__init__()
-        self.input_size = input_size
         self.emb_size = emb_size,
         self.act_func = act_func
         self.batch_norm = batch_norm
         self.dropout = dropout
 
-        self.mlp = LinearLayer(4 * input_size,
+        self.mlp = LinearLayer(4 * emb_size,
                                dims=[2 * emb_size, emb_size],
                                act_func=act_func,
                                batch_norm=batch_norm,
@@ -32,14 +31,13 @@ class AttentionUnitLayer(nn.Module):
 
 
 class Din(nn.Module):
-    def __init__(self, input_dim, emb_size, act_func='Dice', batch_norm=False, dropout=0):
+    def __init__(self, emb_size, act_func='Dice', batch_norm=False, dropout=0):
         super(Din, self).__init__()
-        self.input_dim = input_dim
         self.emb_size = emb_size
         self.act_func = act_func
         self.batch_norm = batch_norm
         self.dropout=dropout
-        self.att_unit = AttentionUnitLayer(input_dim, emb_size, act_func, batch_norm, dropout)
+        self.att_unit = AttentionUnitLayer(emb_size, act_func, batch_norm, dropout)
 
     def forward(self,
                 query,  # (batch_size, 1, emb_size)

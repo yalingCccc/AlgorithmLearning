@@ -2,14 +2,10 @@ import numpy as np
 import pandas as pd
 from torch.utils.data import Dataset, DataLoader
 from config import *
-from sklearn.decomposition import PCA
-from tqdm import tqdm
-from gensim.models import Word2Vec
-import os
 
 
 def input_process(df, verbose=True):
-    for feat in SEQFEATURES + MASKFEATURES:
+    for feat in SEQ_FEATURES:
         if verbose:
             print("process %s..." % feat)
         df[feat] = df[feat].apply(lambda x: np.fromstring(x, dtype=int, sep='|'))
@@ -78,7 +74,7 @@ class DataReader(object):
                 yield dataloader_
 
 if __name__ == '__main__':
-    val_dataset = DataReader(args.test_dataset, batch_size=args.batch_size, shuffle=False, nrows=args.val_size)
+    val_dataset = DataReader(hparams['test_dataset'], batch_size=hparams['batch_size'], shuffle=False, nrows=hparams['val_size'])
     dataloaders = val_dataset.read()
     for loader_i in dataloaders:
         for x,y in loader_i:

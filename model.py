@@ -1,35 +1,93 @@
-import numpy as np
 import torch.nn as nn
 from utils.models import get_model
 from utils.normalization.l2_norm import L2_Normalization
-from utils.layers.DinAttention import Din
+from utils.layers.add_weight.DinAttention import Din
 from config import *
 
+
+class SideInformationLayer(nn.Module):
+    def __init__(self, side_information):
+        super(SideInformationLayer, self).__init__()
+        side_information = {key: np.array(value) for key, value in side_information.items()}
+        side_info_layers = {}
+        for feat in SIDE_INFORMATIONS:
+            if 'list' in feat:
+                side_info_layers[feat] = torch.from_numpy(side_information[feat]).to(device)
+            else:
+                side_info_layers[feat] = torch.from_numpy(side_information[feat]).view(-1, 1).to(device)
+        self.side_info_layers = nn.ModuleDict(side_info_layers)
+
+    def forward(self, feedid, feature):
+        return self.side_info_layers[feature][feedid]
+
+
 class FeedEncoder(nn.Module):
-    def __init__(self):
+    def __init__(self, pretrain_emb, side_information):
         super(FeedEncoder, self).__init__()
-        if args.feed_embeddings is not None:
-            emb = np.load(args.feed_embeddings)
-            self.feed_id_emb_layer = nn.Embedding.from_pretrained(torch.from_numpy(emb['emb1']).float(), freeze=False)
-            self.w2v_feed_emb_layer = nn.Embedding.from_pretrained(torch.from_numpy(emb['emb2']).float(), freeze=False)
+        vocab_size = hparams['vocab_size']
+        emb_size = hparams['emb_size']
+        # feed id
+        if hparams['feed_pretrained'] is not None:
+            self.feed_id_emb_layer = nn.Embedding.from_pretrained(
+                torch.from_numpy(pretrain_emb['feed_emb']).float(), freeze=False,
+                padding_idx=0)
+            self.w2v_feed_emb_layer = nn.Embedding.from_pretrained(
+                torch.from_numpy(pretrain_emb['feed_w2v_embeddings']).float(), freeze=False,
+                padding_idx=0)
         else:
-            self.feed_id_emb_layer = nn.Embedding(args.feed_vocab_size, embedding_dim=args.emb_size)
-            self.w2v_feed_emb_layer = nn.Embedding(args.feed_vocab_size, embedding_dim=args.emb_size)
-        self.fusion = None
-        if args.feed_emb_fusion == 'dense':
-            self.fusion = nn.Linear(2*args.emb_size, args.emb_size)
+            self.feed_id_emb_layer = nn.Embedding(vocab_size['feedid'] + 1, embedding_dim=emb_size,
+                                                  padding_idx=0)
+            self.w2v_feed_emb_layer = nn.Embedding(vocab_size['feedid'] + 1, embedding_dim=emb_size,
+                                                   padding_idx=0)
+        dense_input_size = emb_size
+
+        # side information
+        side_layer = {}
+        for feat in SIDE_INFORMATIONS:
+            input_dim = vocab_size[feat]
+            output_dim = emb_size
+            if 'list' in feat:
+                side_layer[feat] = SeqEncoder(nn.Embedding(input_dim, output_dim, padding_idx=0))
+            else:
+                side_layer[feat] = nn.Embedding(input_dim, output_dim, padding_idx=0)
+            dense_input_size += output_dim
+        self.get_side_info = SideInformationLayer(side_information)
+        self.side_att = nn.ModuleDict(side_layer)
+
+        # feed id interaction
+        self.dense_1 = nn.Linear(2 * emb_size, emb_size)
+
+        # feature interation
+        if hparams['feed_emb_fusion'] == 'dense':
+            self.dense_2 = nn.Linear(dense_input_size, emb_size)
 
     def forward(self, feed_id):
-        feed_id_embs = torch.cat([self.feed_id_emb_layer(feed_id), self.w2v_feed_emb_layer(feed_id)], dim=-1)
-        out = self.fusion(feed_id_embs)
-        return out
+        # feed id emb
+        feed_id_emb = [self.feed_id_emb_layer(feed_id), self.w2v_feed_emb_layer(feed_id)]
+        feed_id_emb = torch.cat(feed_id_emb, dim=-1)
+        if hparams['feed_emb_fusion']:
+            feed_id_emb = self.dense_1(feed_id_emb)
+        emb_list = [feed_id_emb]
+
+        for feat in SIDE_INFORMATIONS:
+            in_x = self.get_side_info(feed_id, feat)
+            if 'list' in feat:
+                mask = (in_x > 0).float()
+                out = self.side_att[feat](feed_id_emb, in_x, mask)
+            else:
+                out = self.side_att[feat](in_x.long())
+                out = out.squeeze(-2)
+            emb_list.append(out)
+        emb = torch.cat(emb_list, dim=-1)
+        output = self.dense_2(emb)
+        return output
 
 
-class FeedSeqEncoder(nn.Module):
-    def __init__(self, feed_encoder):
-        super(FeedSeqEncoder, self).__init__()
-        self.feed_encoder = feed_encoder
-        self.att = Din(args.emb_size_1, args.emb_size)
+class SeqEncoder(nn.Module):
+    def __init__(self, id_encoder):
+        super(SeqEncoder, self).__init__()
+        self.feed_encoder = id_encoder
+        self.att = Din(hparams['emb_size'])
 
     def forward(self, query, seq, mask):
         query = query.unsqueeze(1)
@@ -38,56 +96,97 @@ class FeedSeqEncoder(nn.Module):
         return output
 
 
-class Input(nn.Module):
+class DinAttention(nn.Module):
     def __init__(self):
-        super(Input, self).__init__()
-        # user_emb
-        self.user_emb_layer = nn.Embedding(args.vocab_size['userid'], embedding_dim=args.emb_size)
-        self.feed_emb_layer = FeedEncoder()
+        super(DinAttention, self).__init__()
+        self.att = Din(hparams['emb_size'])
 
-        # feed_id att
+    def forward(self, query, seq, mask):
+        query = query.unsqueeze(1)
+        output = self.att(query, seq, mask)
+        return output
+
+
+class ContextLayer(nn.Module):
+    def __init__(self):
+        super(ContextLayer, self).__init__()
+        self.device_encoder = nn.Embedding(hparams['vocab_size']['device'], hparams['emb_size'])
+
+    def forward(self, x):
+        return self.device_encoder(x[0])
+
+
+class Input(nn.Module):
+    def __init__(self, pretrain_emb, side_information):
+        super(Input, self).__init__()
+        vocab_size = hparams['vocab_size']
+        emb_size = hparams['emb_size']
+        # user embedding
+        if hparams['user_pretrained']:
+            self.user_encoder = nn.Embedding.from_pretrained(
+                torch.from_numpy(pretrain_emb['user_embeddings']).float(), freeze=False,
+                padding_idx=0)
+        else:
+            self.user_encoder = nn.Embedding(vocab_size['userid'], embedding_dim=emb_size,
+                                               padding_idx=0)
+
+        # feed embedding
+        self.feed_encoder = FeedEncoder(pretrain_emb, side_information)
+        self.context_layer = ContextLayer()
+
+        # hist action sequences attention
         seq_feat_layers = {}
-        for feat in SEQFEATURES:
-            seq_feat_layers[feat] = FeedSeqEncoder(self.feed_emb_layer)
+        for feat in SEQ_FEATURES:
+            seq_feat_layers[feat] = DinAttention()
         self.seq_feat_layers = nn.ModuleDict(seq_feat_layers)
 
     def forward(self, inputs):
-        input_list = []
-        input_list.append(self.user_emb_layer(inputs[0]))
-        feed_id_emb = self.feed_emb_layer(inputs[1])
-        input_list.append(feed_id_emb)
-        for feat in SEQFEATURES:
-            idx = FEATURES.index(feat)
-            input_list.append(self.seq_feat_layers[feat](feed_id_emb, inputs[idx], inputs[idx + 1]))
-        return input_list
+        emb_list = []
+        emb_list.append(self.user_encoder(inputs[FEATURES.index('userid')]))
+        feed_id_emb = self.feed_encoder(inputs[FEATURES.index('feedid')])
+        emb_list.append(feed_id_emb)
+        if len(CONTEXT_FEATURES) > 0:
+            start_idx = FEATURES.index(CONTEXT_FEATURES[0])
+            end_idx = FEATURES.index(CONTEXT_FEATURES[-1]) + 1
+            emb_list.append(self.context_layer(inputs[start_idx:end_idx]))
+        if len(SEQ_FEATURES) > 0:
+            for feat in SEQ_FEATURES:
+                feat_idx = FEATURES.index(feat)
+                hist_item_list = inputs[feat_idx]
+                mask = (hist_item_list > 0).float()
+                batch_size, seq_len = hist_item_list.shape
+                hist_items = hist_item_list.view(batch_size * seq_len)
+                hist_item_embs = self.feed_encoder(hist_items).view(batch_size, seq_len, -1)
+                emb_list.append(self.seq_feat_layers[feat](feed_id_emb, hist_item_embs, mask))
+        return emb_list
+
 
 # DLRM
 class DLRM(nn.Module):
-    def __init__(self):
+    def __init__(self, pretrain_emb=None, side_information=None):
         super(DLRM, self).__init__()
         # Input网络
-        self.inputLayer = Input()
+        self.inputLayer = Input(pretrain_emb, side_information)
         # 共享bottom网络
-        self.mmoe = get_model('mmoe')(input_dim=args.mmoe_input_dim,
-                         num_expert=args.num_expert,
-                         num_task=args.num_task,
-                         expert_dims=args.expert_dims,
-                         use_top_layer=args.mmoe_mpl,
-                         top_layer_dims=args.mmoe_mpl_dims,
-                         activation=args.mmor_activation,
-                         dropout=args.mmoe_dropout,
-                         batch_norm=args.mmoe_batchnorm,
-                         sigmoid=False)
-        # 定义每个task的top网络
-
-        self.batch_norm = nn.BatchNorm1d(args.emb_size)
+        self.mmoe = get_model('mmoe')(input_dim=hparams['mmoe_input_dim'],
+                                      num_expert=hparams['num_expert'],
+                                      num_task=hparams['num_task'],
+                                      expert_dims=hparams['expert_dims'],
+                                      use_top_layer=hparams['mmoe_mpl'],
+                                      top_layer_dims=hparams['mmoe_mpl_dims'],
+                                      activation=hparams['mmor_activation'],
+                                      dropout=hparams['mmoe_dropout'],
+                                      batch_norm=hparams['mmoe_batchnorm'],
+                                      sigmoid=False)
+        self.batch_norm = nn.BatchNorm1d(hparams['emb_size'])
         self.l2_layer = L2_Normalization()
 
     def forward(self, inputs):
         input_embs = self.inputLayer(inputs)
         emb_init = torch.cat(input_embs.copy(), dim=1)
+        assert emb_init.shape[1] == hparams['input_dim']
         # 交互
-        if args.l2:
+        if hparams['l2']:
             embs_normed = []
             for x in input_embs:
                 x = self.batch_norm(x)
@@ -103,4 +202,5 @@ class DLRM(nn.Module):
         # mmoe
         mmoe_input = torch.cat([emb_init, emb_intered], dim=-1)
         mmoe_output = self.mmoe(mmoe_input)
+        # TODO：Multiple Dropout
         return mmoe_output

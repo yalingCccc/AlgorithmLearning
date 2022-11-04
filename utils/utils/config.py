@@ -1,7 +1,6 @@
 import argparse
 import sys
 import json
-import os
 
 
 def get_parser(args):
@@ -14,8 +13,17 @@ def get_parser(args):
     args = parser.parse_args()
     while len(sys.argv) > 1:
         sys.argv.pop()
-
-    for dir in [args.output_dir, args.model_dir, args.log_dir]:
-        if not os.path.exists(dir):
-            os.mkdir(dir)
     return args
+
+def get_conf_from_json(conf_file_path, param_map=None):
+    _param_map = {}
+
+    with open(conf_file_path, "r") as f:
+        config = json.load(f)
+    if not config:
+        raise "config file not exists"
+    if config['parameters']:
+        _param_map = config['parameters']
+    if param_map:
+        _param_map.update(param_map)
+    return _param_map

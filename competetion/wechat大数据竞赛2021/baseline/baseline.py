@@ -6,8 +6,8 @@ import numpy as np
 import pandas as pd
 import tensorflow.compat.v1 as tf
 from tensorflow import feature_column as fc
-from competetion.wechat.baseline.comm import ACTION_LIST, STAGE_END_DAY, FEA_COLUMN_LIST
-from competetion.wechat.baseline.evaluation import uAUC, compute_weighted_score
+from competetion.wechat大数据竞赛2021.baseline.comm import ACTION_LIST, STAGE_END_DAY, FEA_COLUMN_LIST
+from competetion.wechat大数据竞赛2021.baseline.evaluation import uAUC, compute_weighted_score
 
 flags = tf.app.flags
 FLAGS = flags.FLAGS

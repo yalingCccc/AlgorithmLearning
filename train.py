@@ -13,36 +13,12 @@ from utils.utils.optimizer import get_optimizer
 # from functools import partial
 import os
 
-writer = SummaryWriter(log_dir=args.log_dir)
-np.random.seed(0)  # 同时也要设置numpy
-torch.manual_seed(0)
-torch.cuda.manual_seed_all(0)
+writer = SummaryWriter(log_dir=hparams['log_dir'])
+np.random.seed(SEED)  # 同时也要设置numpy
+torch.manual_seed(SEED)
+torch.cuda.manual_seed_all(SEED)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
-
-
-def read_embedding(vocab_size, emb_size, read_emb):
-    if read_emb.shape[1] == 2:
-        read_emb = [[e[0]] + list(np.fromstring(e[1], np.float, sep=' ')) for e in read_emb]
-        read_emb = np.matrix(read_emb)
-    elif read_emb.shape[1] == emb_size + 1:
-        read_emb = np.matrix(read_emb)
-    else:
-        print("不支持的输入格式......")
-    # 缺失值用mean填充
-    mean_emb = np.mean(read_emb[:, 1:], axis=0)[0, :]
-    assert mean_emb.shape[1] == emb_size
-    all_ids = list(range(vocab_size))
-    fill_ids = [e for e in all_ids if e not in read_emb[:, 0]]
-    fill_ids = np.matrix(fill_ids).reshape(-1, 1)
-    fill_embs = np.tile(np.matrix(mean_emb), fill_ids.shape[0]).reshape(fill_ids.shape[0], -1)
-    fill_embs = np.concatenate([fill_ids, fill_embs], axis=1)
-    embeddings = np.concatenate([read_emb, fill_embs], axis=0)
-    embeddings = sorted(embeddings, key=lambda x: x[0, 0], reverse=False)
-    embeddings = np.concatenate(embeddings, axis=0)
-    embeddings = torch.from_numpy(embeddings[:, 1:]).float()
-    assert embeddings.shape == (vocab_size, emb_size)
-    return embeddings
 
 
 def get_loss(y_hat, target, loss_fn):
@@ -59,7 +35,7 @@ def train_loop(model, model_fn, data_reader):
     optimizer, scheduler, loss_fn, metric_fn = model_fn['optimizer'], model_fn['scheduler'], model_fn['loss_fn'], \
                                                model_fn['metric_fn']
     train_iter = 0
-    for epoch in range(args.epoch_num):
+    for epoch in range(hparams['epoch_num']):
         train_data = train_reader.read()
         for idx1, train_dataloader in enumerate(train_data):
             for idx2, (X, y) in enumerate(train_dataloader):
@@ -75,7 +51,7 @@ def train_loop(model, model_fn, data_reader):
                 loss.backward()
                 optimizer.step()
 
-                if train_iter % args.val_step == 0:
+                if train_iter % hparams['val_step'] == 0:
                     val_dataloader = valid_reader.read()
                     losses = []
                     for loader_i in val_dataloader:
@@ -85,16 +61,17 @@ def train_loop(model, model_fn, data_reader):
                             losses.append(val_loss.cpu().detach().item())
                     losses = np.array(losses)
                     writer.add_scalar('Loss/Valid', losses.mean(), train_iter)
-                    print("epoch_%d/%d, data_%d, iter_%d, train_loss=%.2f, valid_loss=%.2f, lr=%f"
-                          % (epoch + 1, args.epoch_num,
+                    print("epoch_%d/%d, data_%d, iter_%d, train_loss=%.2f, valid_loss=%.2f, lr=%g"
+                          % (epoch + 1, hparams['epoch_num'],
                              idx1 + 1, idx2 + 1,
                              loss, losses.mean(), optimizer.state_dict()['param_groups'][0]['lr']))
-                if train_iter % args.verbose_metric_step == 0:
+                if train_iter % hparams['verbose_metric_step'] == 0:
                     test_loop(model, valid_reader, metric_fn)
                 train_iter += 1
-        if not os.path.exists(args.model_dir):
-            os.mkdir(args.model_dir)
-        torch.save(model.state_dict(), os.path.join(args.model_dir, 'model_%s.pth' % epoch))
+            # scheduler.step()
+        if not os.path.exists(hparams['model_dir']):
+            os.mkdir(hparams['model_dir'])
+        torch.save(model.state_dict(), os.path.join(hparams['model_dir'], 'model_%s.pth' % epoch))
 
 
 def test_loop(model, reader, metric_fn):
@@ -117,38 +94,46 @@ def test_loop(model, reader, metric_fn):
 
 
 def main(_argv):
-    logger.info('params')
-    for k in list(vars(args).keys()):
-        print('%s: %s' % (k, vars(args)[k]))
+    for dir in [hparams['output_dir'], hparams['model_dir'], hparams['log_dir']]:
+        if not os.path.exists(dir):
+            os.mkdir(dir)
 
     # 定义数据读入
-    data_reader = [DataReader(args.train_dataset, batch_size=args.batch_size, shuffle=True, chunksize=args.chunk_size),
-                   DataReader(args.test_dataset, batch_size=args.batch_size, shuffle=False, nrows=args.val_size),
-                   DataReader(args.test_dataset, batch_size=args.batch_size, shuffle=False, chunksize=args.chunk_size)]
+    data_reader = [DataReader(hparams['train_dataset'], batch_size=hparams['batch_size'], shuffle=True,
+                              chunksize=hparams['chunk_size']),
+                   DataReader(hparams['test_dataset'], batch_size=hparams['batch_size'], shuffle=False,
+                              nrows=hparams['val_size']),
+                   DataReader(hparams['test_dataset'], batch_size=hparams['batch_size'], shuffle=False,
+                              chunksize=hparams['chunk_size'])]
 
-    if args.mode in ['offline_train', 'online_train']:
-        model = DLRM().to(device)
+    if hparams['mode'] in ['offline_train', 'online_train']:
+        side_information = pickle_process('load', hparams['feed_info_pro'])
+        pretrain_emb = pickle_process('load', hparams['pretrain_embeddings'])
+        model = DLRM(pretrain_emb, side_information)
+        model.to(device)
+        optimizer = get_optimizer(hparams['optimizer'])(model.parameters(), lr=hparams['base_lr'])
         model_fn = {
             'loss_fn': nn.BCEWithLogitsLoss(reduction='mean').to(device),
-            'optimizer': get_optimizer(args.optimizer)(model.parameters(), lr=args.base_lr),
-            'scheduler': CosineScheduler(max_update=args.max_warm_batch,
-                                         base_lr=args.base_lr,  # 预热阶段和cos阶段的交界值
-                                         final_lr=args.final_lr,  # cos阶段的最终值
-                                         warmup_steps=args.warmup_steps,  # 分多少步加热
-                                         warmup_begin_lr=args.warmup_begin_lr,  # 预热阶段的初始值
-                                         warmup_mode=args.warmup_mode).adjust_learning_rate,
-            # 'scheduler': torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda t: t / 10),
+            'optimizer': optimizer,
+            'scheduler': CosineScheduler(max_update=hparams['max_warm_batch'],
+                                         base_lr=hparams['base_lr'],  # 预热阶段和cos阶段的交界值
+                                         final_lr=hparams['final_lr'],  # cos阶段的最终值
+                                         warmup_steps=hparams['warmup_steps'],  # 分多少步加热
+                                         warmup_begin_lr=hparams['warmup_begin_lr'],  # 预热阶段的初始值
+                                         warmup_mode=hparams['warmup_mode']).adjust_learning_rate,
+            # 'scheduler': torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[1, 2, 3, 4, 5], gamma=0.1),
             'metric_fn': score
         }
 
         # 模型训练
         logger.info("train model...")
         train_loop(model, model_fn, data_reader)
-    elif 'val' in args.mode:
+    elif 'val' in hparams['mode']:
         logger.info("upload model dict...")
-        model = DLRM().to(device)
-        model.load_state_dict(torch.load(os.path.join(args.model_dir, 'model_%s.pth' % args.model_version),
-                                         map_location=device), strict=True)
+        model = DLRM()
+        model.load_state_dict(torch.load(os.path.join(hparams['model_dir'], 'model_%s.pth' % hparams['model_version']),
+                                         map_location='cpu'), strict=True)
+        model.to(device)
 
         logger.info("validation model...")
         test_loop(model, data_reader[2], score)

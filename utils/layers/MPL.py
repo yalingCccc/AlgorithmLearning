@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from utils.layers.ActiveLayer import activation_layer
+from utils.layers.nonlinear.ActiveLayer import activation_layer
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
